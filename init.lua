@@ -1178,6 +1178,119 @@ do
   })
 end
 
+-- ============================================================
+-- SECTION 12: HARPOON (quick file navigation)
+-- ThePrimeagen/harpoon v2 — pin a handful of files and jump
+-- between them instantly, per project.
+-- ============================================================
+do
+  -- [[ Harpoon ]]
+  -- Harpoon lets you "pin" the few files you actually move between in a
+  -- project and jump straight to them by slot number — no fuzzy-finding,
+  -- no buffer cycling. The list is per-project (keyed by cwd) and persists
+  -- to disk between sessions.
+  --
+  -- NOTE: harpoon v2 lives on the `harpoon2` branch, so we pin `version`.
+  -- It needs plenary.nvim, which Telescope (Section 5) already installs;
+  -- we list it again here so this section is self-contained — vim.pack
+  -- de-duplicates, so requesting it twice is harmless.
+  vim.pack.add {
+    gh 'nvim-lua/plenary.nvim',
+    { src = gh 'ThePrimeagen/harpoon', version = 'harpoon2' },
+  }
+
+  local harpoon = require 'harpoon'
+  -- harpoon:setup() is REQUIRED (it wires up the autocmds that persist the
+  -- list). `key` decides how lists are scoped — the default (cwd) gives you
+  -- one list per project, which is what we want.
+  harpoon:setup {
+    settings = {
+      save_on_toggle = true, -- write list changes when you close the menu
+      sync_on_ui_close = true, -- flush the list to disk when the menu closes
+    },
+  }
+
+  -- [[ Extensions (per the harpoon2 README) ]]
+  local harpoon_extensions = require 'harpoon.extensions'
+  -- Highlight the entry for the file you're currently in when the menu opens.
+  harpoon:extend(harpoon_extensions.builtins.highlight_current_file())
+
+  -- Add split/tab openers *inside* the native menu. These keymaps are
+  -- buffer-local to the harpoon menu window (`cx.bufnr`), so they don't
+  -- touch your global maps. Mirrors what Telescope already offers in its
+  -- picker, so both UIs behave the same.
+  harpoon:extend {
+    UI_CREATE = function(cx)
+      vim.keymap.set('n', '<C-v>', function() harpoon.ui:select_menu_item { vsplit = true } end, { buffer = cx.bufnr, desc = 'Harpoon: open in vsplit' })
+      vim.keymap.set('n', '<C-x>', function() harpoon.ui:select_menu_item { split = true } end, { buffer = cx.bufnr, desc = 'Harpoon: open in split' })
+      vim.keymap.set('n', '<C-t>', function() harpoon.ui:select_menu_item { tabedit = true } end, { buffer = cx.bufnr, desc = 'Harpoon: open in tab' })
+    end,
+  }
+
+  -- Add the current file to the end of this project's harpoon list.
+  vim.keymap.set('n', '<leader>a', function() harpoon:list():add() end, { desc = 'Harpoon: [A]dd file' })
+
+  -- Open the harpoon list in a Telescope picker — fuzzy search + file
+  -- preview. Telescope is set up in Section 5, so its modules are available
+  -- by the time this runs. (This picker is read-only: it jumps, it does not
+  -- reorder — use the native menu on <leader>e for that.)
+  local function toggle_telescope(harpoon_list)
+    local conf = require('telescope.config').values
+    local file_paths = {}
+    for _, item in ipairs(harpoon_list.items) do
+      table.insert(file_paths, item.value)
+    end
+
+    require('telescope.pickers')
+      .new({}, {
+        prompt_title = 'Harpoon',
+        finder = require('telescope.finders').new_table { results = file_paths },
+        previewer = conf.file_previewer {},
+        sorter = conf.generic_sorter {},
+      })
+      :find()
+  end
+
+  -- <C-e>: browse the list in Telescope (normally scrolls one line down;
+  -- harpoon convention reuses it).
+  vim.keymap.set('n', '<C-e>', function() toggle_telescope(harpoon:list()) end, { desc = 'Harpoon: open in Telescope' })
+
+  -- <leader>e: native menu — editable. Delete lines to remove entries,
+  -- reorder lines to change slot numbers, then `q`/`<Esc>` to save.
+  vim.keymap.set('n', '<leader>e', function() harpoon.ui:toggle_quick_menu(harpoon:list()) end, { desc = 'Harpoon: [E]dit list (native menu)' })
+
+  -- Jump straight to a pinned file by slot number.
+  for i = 1, 4 do
+    vim.keymap.set('n', '<leader>' .. i, function() harpoon:list():select(i) end, { desc = 'Harpoon to file ' .. i })
+  end
+
+  -- Cycle through the list without opening the menu. `[`/`]` follow vim's
+  -- "previous/next" idiom and stay clear of the reserved `<leader>h` (Git
+  -- Hunk) and `<leader>j` (Java) groups.
+  vim.keymap.set('n', '<leader>[', function() harpoon:list():prev() end, { desc = 'Harpoon: prev file' })
+  vim.keymap.set('n', '<leader>]', function() harpoon:list():next() end, { desc = 'Harpoon: next file' })
+
+  -- Register these with which-key (set up in Section 4) so they show up in
+  -- the `<leader>` popup with a shared anchor icon and consistent labels.
+  -- harpoon's keys are scattered leaf keys rather than one prefix, so we
+  -- decorate them individually here instead of adding a `group` in Section 4.
+  local ok_wk, wk = pcall(require, 'which-key')
+  if ok_wk then
+    local anchor = { icon = '⚓', color = 'cyan' }
+    wk.add {
+      { '<leader>a', desc = 'Harpoon: add file', icon = anchor },
+      { '<C-e>', desc = 'Harpoon: view list (Telescope)', icon = anchor },
+      { '<leader>e', desc = 'Harpoon: edit list (menu)', icon = anchor },
+      { '<leader>1', desc = 'Harpoon: go to file 1', icon = anchor },
+      { '<leader>2', desc = 'Harpoon: go to file 2', icon = anchor },
+      { '<leader>3', desc = 'Harpoon: go to file 3', icon = anchor },
+      { '<leader>4', desc = 'Harpoon: go to file 4', icon = anchor },
+      { '<leader>[', desc = 'Harpoon: prev file', icon = anchor },
+      { '<leader>]', desc = 'Harpoon: next file', icon = anchor },
+    }
+  end
+end
+
 -- The line beneath this is called `modeline`. See `:help modeline`
 -- vim: ts=2 sts=2 sw=2 et
 
