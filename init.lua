@@ -373,6 +373,7 @@ do
     spec = {
       { '<leader>s', group = '[S]earch', mode = { 'n', 'v' } },
       { '<leader>t', group = '[T]oggle' },
+      { '<leader>j', group = '[J]ava', mode = { 'n', 'v' } }, -- jdtls actions, see Section 11
       { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } }, -- Enable gitsigns recommended keymaps first
       { 'gr', group = 'LSP Actions', mode = { 'n' } },
     },
@@ -769,6 +770,12 @@ do
   local ensure_installed = vim.tbl_keys(servers or {})
   vim.list_extend(ensure_installed, {
     -- You can add other tools here that you want Mason to install
+
+    -- Java toolchain. These are driven by nvim-jdtls in Section 11, NOT by
+    -- `vim.lsp.enable` above, so they live here instead of the `servers` table.
+    'jdtls', -- Eclipse JDT Language Server (the Java LSP itself)
+    'java-debug-adapter', -- DAP server, lets nvim-dap debug Java
+    'java-test', -- JUnit/TestNG runner integration for nvim-jdtls
   })
 
   require('mason-tool-installer').setup { ensure_installed = ensure_installed }
@@ -986,6 +993,189 @@ do
   --
   --  Uncomment the following line and add your plugins to `lua/custom/plugins/*.lua` to get going.
   -- require 'custom.plugins'
+end
+
+-- ============================================================
+-- SECTION 11: JAVA (jdtls)
+-- Eclipse JDT Language Server via nvim-jdtls, with debugging & testing
+-- ============================================================
+do
+  -- Java needs more than a plain `vim.lsp.enable` server: Eclipse's jdt.ls
+  -- wants a dedicated per-project workspace directory, loads extension
+  -- "bundles" for debugging/testing, and exposes Java-specific code actions
+  -- (organize imports, extract method, run tests, ...). The `nvim-jdtls`
+  -- plugin wires all of this up, so we drive jdt.ls through it rather than the
+  -- generic LSP setup in Section 6.
+  --
+  -- The `jdtls`, `java-debug-adapter` and `java-test` packages themselves are
+  -- installed by Mason (see the `ensure_installed` list in Section 6).
+  --
+  -- NOTE: jdt.ls runs on the JVM and needs Java 21+ on your PATH (or via
+  -- $JAVA_HOME). It can still build projects targeting older Java versions via
+  -- `settings.java.configuration.runtimes` below.
+  vim.pack.add {
+    gh 'mfussenegger/nvim-jdtls',
+    gh 'mfussenegger/nvim-dap', -- Needed for jdtls debugging & test running
+  }
+
+  -- Root of the Mason install, where the jdtls launcher and extension jars live.
+  local mason = vim.fn.stdpath 'data' .. '/mason'
+
+  ---Build the jdt.ls config and attach it to the current Java buffer.
+  ---Runs for every `java` buffer; `start_or_attach` reuses a running server
+  ---when the buffer belongs to a project jdt.ls is already handling.
+  local function start_jdtls()
+    local jdtls = require 'jdtls'
+
+    -- Detect the project root from common build-tool markers so jdt.ls can
+    -- group buffers of the same project under one server.
+    local root_dir = vim.fs.root(0, { 'gradlew', 'mvnw', 'pom.xml', 'build.gradle', 'settings.gradle', '.git' })
+
+    -- Give each project its own workspace so jdt.ls caches its index between
+    -- sessions instead of re-indexing every time you open a file.
+    local project_name = root_dir and vim.fn.fnamemodify(root_dir, ':p:h:t') or vim.fn.expand '%:p:h:t'
+    local workspace_dir = vim.fn.stdpath 'data' .. '/jdtls-workspace/' .. project_name
+
+    -- Extension bundles: java-debug-adapter enables debugging and java-test
+    -- enables running/debugging JUnit & TestNG tests. Both are optional — the
+    -- globs return nothing (and are skipped) until Mason has installed them.
+    local bundles = {}
+    local debug_bundle = vim.fn.glob(mason .. '/packages/java-debug-adapter/extension/server/com.microsoft.java.debug.plugin-*.jar', true)
+    local has_debug = debug_bundle ~= ''
+    if has_debug then vim.list_extend(bundles, vim.split(debug_bundle, '\n', { trimempty = true })) end
+    vim.list_extend(bundles, vim.split(vim.fn.glob(mason .. '/packages/java-test/extension/server/*.jar', true), '\n', { trimempty = true }))
+
+    -- Tell jdt.ls our client can resolve extra edits (e.g. adding an import)
+    -- lazily when a completion item is confirmed.
+    local extendedClientCapabilities = jdtls.extendedClientCapabilities
+    extendedClientCapabilities.resolveAdditionalTextEditsSupport = true
+
+    local config = {
+      name = 'jdtls',
+      -- Mason ships a `jdtls` launcher that resolves the Equinox launcher jar,
+      -- the OS-specific config directory and JVM args for us.
+      cmd = { mason .. '/bin/jdtls', '-data', workspace_dir },
+      root_dir = root_dir,
+
+      -- Advertise blink.cmp's completion capabilities to the server. (Servers
+      -- in Section 6 get these automatically; jdt.ls is started by hand here,
+      -- so we pass them explicitly.)
+      capabilities = require('blink.cmp').get_lsp_capabilities(),
+
+      -- See the eclipse.jdt.ls wiki for the full list of settings.
+      settings = {
+        java = {
+          signatureHelp = { enabled = true },
+          -- Decompile dependency sources you don't have jars for, so "go to
+          -- definition" still works into libraries.
+          contentProvider = { preferred = 'fernflower' },
+          references = { includeDecompiledSources = true },
+          -- Show parameter names inline at call sites.
+          inlayHints = { parameterNames = { enabled = 'all' } },
+          configuration = {
+            -- Prompt before re-running the build on pom.xml/build.gradle edits.
+            updateBuildConfiguration = 'interactive',
+            -- Register every JDK we can find so jdt.ls matches each project to
+            -- the right Java version automatically (from Maven
+            -- `maven.compiler.release`, Gradle toolchains, etc.). Paths that
+            -- don't exist are skipped, so you can install more later with
+            -- `sudo dnf install java-<ver>-openjdk-devel` and just restart
+            -- Neovim to pick them up. jdt.ls itself always runs on your default
+            -- `java` (25) regardless of which runtime a project uses.
+            runtimes = (function()
+              local jdks = vim.fn.expand '$HOME' .. '/.jdks'
+              -- Each EE name lists candidate JDK homes; the first that exists
+              -- wins. `~/.jdks/temurin-*` is where scripts/install-jdks.sh puts
+              -- them (Fedora 44 only ships JDK 25/26 via dnf); the /usr/lib/jvm
+              -- paths cover distro-packaged JDKs if you install them that way.
+              local candidates = {
+                { name = 'JavaSE-1.8', paths = { jdks .. '/temurin-8', '/usr/lib/jvm/java-1.8.0-openjdk' } },
+                { name = 'JavaSE-11', paths = { jdks .. '/temurin-11', '/usr/lib/jvm/java-11-openjdk' } },
+                { name = 'JavaSE-17', paths = { jdks .. '/temurin-17', '/usr/lib/jvm/java-17-openjdk' } },
+                { name = 'JavaSE-21', paths = { jdks .. '/temurin-21', '/usr/lib/jvm/java-21-openjdk' } },
+                { name = 'JavaSE-25', paths = { '/usr/lib/jvm/java-25-openjdk', jdks .. '/temurin-25' } },
+              }
+              local found = {}
+              for _, c in ipairs(candidates) do
+                for _, path in ipairs(c.paths) do
+                  if vim.uv.fs_stat(path) then
+                    found[#found + 1] = { name = c.name, path = path }
+                    break
+                  end
+                end
+              end
+              return found
+            end)(),
+          },
+          -- Never collapse imports into wildcard `import x.*` statements.
+          sources = {
+            organizeImports = { starThreshold = 9999, staticStarThreshold = 9999 },
+          },
+          completion = {
+            importOrder = { 'java', 'javax', 'com', 'org' },
+            -- Static members offered as completions from anywhere.
+            favoriteStaticMembers = {
+              'org.junit.jupiter.api.Assertions.*',
+              'org.junit.Assert.*',
+              'org.mockito.Mockito.*',
+              'org.assertj.core.api.Assertions.*',
+              'java.util.Objects.requireNonNull',
+              'java.util.Objects.requireNonNullElse',
+            },
+          },
+          -- Nicer generated code (toString / equals / hashCode).
+          codeGeneration = {
+            toString = { template = '${object.className}{${member.name()}=${member.value}, ${otherMembers}}' },
+            hashCodeEquals = { useJava7Objects = true },
+            useBlocks = true,
+          },
+        },
+      },
+
+      init_options = {
+        bundles = bundles,
+        extendedClientCapabilities = extendedClientCapabilities,
+      },
+
+      -- Java-specific keymaps plus debug/test wiring, scoped to this buffer.
+      on_attach = function(_, bufnr)
+        local map = function(keys, func, desc, mode)
+          vim.keymap.set(mode or 'n', keys, func, { buffer = bufnr, desc = 'Java: ' .. desc })
+        end
+
+        map('<leader>jo', jdtls.organize_imports, '[O]rganize Imports')
+        map('<leader>jv', jdtls.extract_variable, 'Extract [V]ariable')
+        map('<leader>jv', function() jdtls.extract_variable(true) end, 'Extract [V]ariable', 'v')
+        map('<leader>jc', jdtls.extract_constant, 'Extract [C]onstant')
+        map('<leader>jc', function() jdtls.extract_constant(true) end, 'Extract [C]onstant', 'v')
+        map('<leader>jm', function() jdtls.extract_method(true) end, 'Extract [M]ethod', 'v')
+        map('<leader>jt', jdtls.test_nearest_method, '[T]est Nearest Method')
+        map('<leader>jT', jdtls.test_class, '[T]est Class')
+
+        -- Register java-debug-adapter / java-test with nvim-dap so you can
+        -- debug and run tests. Only wire this up once the debug bundle is
+        -- actually installed — otherwise jdt.ls rejects the resolveMainClass
+        -- request and prints a confusing error on first launch. Wrapped in
+        -- pcall in case nvim-dap itself isn't present.
+        if has_debug then
+          pcall(function()
+            jdtls.setup_dap { hotcodereplace = 'auto' }
+            require('jdtls.dap').setup_dap_main_class_configs()
+          end)
+        end
+      end,
+    }
+
+    jdtls.start_or_attach(config)
+  end
+
+  -- Start/attach jdt.ls whenever a Java buffer is opened (this also fires for
+  -- the first Java file you open at startup).
+  vim.api.nvim_create_autocmd('FileType', {
+    pattern = 'java',
+    group = vim.api.nvim_create_augroup('kickstart-jdtls', { clear = true }),
+    callback = start_jdtls,
+  })
 end
 
 -- The line beneath this is called `modeline`. See `:help modeline`
