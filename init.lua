@@ -1335,6 +1335,75 @@ do
   end
 end
 
+-- ============================================================
+-- SECTION 13: MINI.FILES (file explorer / project browser)
+-- Miller-column file explorer from mini.nvim. Built for browsing a
+-- project's structure and file names, with a live preview column, and
+-- for buffer-based file operations (create/rename/delete/move by
+-- editing the listing like text, then `=` to apply).
+-- ============================================================
+do
+  -- mini.nvim is already installed in Section 4, so mini.files needs no
+  -- `vim.pack.add` — just its setup() and a couple of keymaps.
+  --
+  -- The explorer shows directories as vertical columns (Miller columns):
+  -- your current dir in the middle, parents to the left, and a live
+  -- preview of whatever's under the cursor to the right.
+  require('mini.files').setup {
+    windows = {
+      -- Preview the file/dir under the cursor — the whole point when
+      -- you're browsing to learn a codebase.
+      preview = true,
+      width_focus = 30,
+      width_preview = 60,
+    },
+    options = {
+      -- Open mini.files instead of netrw when you edit a directory
+      -- (`nvim .`, `:e src/`, …).
+      use_as_default_explorer = true,
+      -- Send deletions to mini's trash instead of nuking them, so a
+      -- mistyped `d` + `=` is recoverable.
+      permanent_delete = false,
+    },
+  }
+
+  -- Open at the CURRENT FILE's directory, cursor on that file — the
+  -- "where am I / what's next to this file?" motion.
+  vim.keymap.set('n', '-', function() MiniFiles.open(vim.api.nvim_buf_get_name(0)) end, { desc = 'mini.files (current file dir)' })
+
+  -- Open at the PROJECT ROOT (cwd) — start browsing the whole tree.
+  vim.keymap.set('n', '<leader>-', function() MiniFiles.open(vim.uv.cwd()) end, { desc = 'mini.files (project root)' })
+
+  -- Buffer-local extras, added when an explorer buffer is created. They
+  -- exist only inside the explorer, so they don't touch global maps.
+  vim.api.nvim_create_autocmd('User', {
+    pattern = 'MiniFilesBufferCreate',
+    callback = function(args)
+      local b = args.data.buf_id
+      -- Yank the full path of the entry under the cursor.
+      vim.keymap.set('n', 'gy', function()
+        local entry = MiniFiles.get_fs_entry()
+        if entry then vim.fn.setreg(vim.v.register, entry.path) end
+      end, { buffer = b, desc = 'Yank path' })
+      -- Open the entry with the OS default handler (images, PDFs, …).
+      vim.keymap.set('n', 'gX', function()
+        local entry = MiniFiles.get_fs_entry()
+        if entry then vim.ui.open(entry.path) end
+      end, { buffer = b, desc = 'OS open' })
+    end,
+  })
+
+  -- Surface the two openers in the which-key popup (Section 4).
+  local ok_wk, wk = pcall(require, 'which-key')
+  if ok_wk then
+    local files_icon = { icon = '📁', color = 'yellow' }
+    wk.add {
+      { '-', desc = 'mini.files: current file dir', icon = files_icon },
+      { '<leader>-', desc = 'mini.files: project root', icon = files_icon },
+    }
+  end
+end
+
 -- The line beneath this is called `modeline`. See `:help modeline`
 -- vim: ts=2 sts=2 sw=2 et
 
